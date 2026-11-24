@@ -8,6 +8,8 @@
 #include "src/gui/streaming/qobuzpage.h"
 #include "src/gui/streaming/radiopage.h"
 #include "src/gui/shell/settingsrow.h"
+#include "src/gui/streaming/podcastdownloads.h"
+#include "src/gui/streaming/podcastauto.h"
 #include "src/gui/streaming/tidalpage.h"
 
 lv_obj_t *streaming_screen;
@@ -16,6 +18,8 @@ void streaming_init(gui_config_t *cfg) {
 	qobuzpage_init(cfg);
 	tidalpage_init(cfg);
 	podcastpage_init(cfg);
+	podcastdownloads_init(cfg);
+	podcastauto_init(cfg);
 
 	const grid_entry_t entries[] = {
 		{"tidal", &icon_menu_tidal, &tidal_screen, NULL},

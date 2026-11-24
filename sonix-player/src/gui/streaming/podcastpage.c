@@ -19,6 +19,7 @@
 #include "src/gui/nowplaying/cover.h"
 #include "src/gui/nowplaying/coverloader.h"
 #include "src/gui/streaming/podcastcard.h"
+#include "src/gui/streaming/podcastdownloads.h"
 #include "src/gui/streaming/podcastopml.h"
 #include "src/gui/streaming/qobuzart.h"
 #include "src/gui/shell/settingsrow.h"
@@ -34,6 +35,7 @@
 #include "src/system/streaming/podcast.h"
 #include "src/system/streaming/podcastcache.h"
 #include "src/system/streaming/podcastdl.h"
+#include "src/system/streaming/podcastoptions.h"
 #include "src/system/streaming/podcaststate.h"
 #include "src/system/streaming/podcastsubs.h"
 #include "src/system/streaming/streamturn.h"
@@ -2091,7 +2093,7 @@ static void row_clicked_cb(lv_event_t *e) {
 }
 
 // ---------------------------------------------------------------------------
-// the three-dot menu: follow, or stop
+// the three-dot menu: follow, stop, or manage this podcast's downloads
 // ---------------------------------------------------------------------------
 
 static int menu_row_index;
@@ -2122,20 +2124,36 @@ static void unfollow_cb(void *user) {
 	}
 }
 
+static void downloads_cb(void *user) {
+	(void)user;
+	if (menu_row_index < 0 || menu_row_index >= list_count) {
+		return;
+	}
+	// The card tab keeps its shows in a different array from the catalogue's
+	// feeds; either way the Downloads page wants the id and the folder title.
+	if (list_kind == JOB_CARD) {
+		podcastdownloads_open(card_shows[menu_row_index].feed_id, podcastcard_show_name(&card_shows[menu_row_index]));
+	} else {
+		podcastdownloads_open(result_feeds[menu_row_index].id, result_feeds[menu_row_index].title);
+	}
+}
+
 static void row_menu_cb(lv_event_t *e) {
 	menu_row_index = menu_index_of(lv_event_get_current_target(e));
 	if (menu_row_index < 0 || menu_row_index >= list_count) {
 		return;
 	}
 
-	// Two one-entry tables instead of one label picked with a ternary: the tool
-	// that collects the strings to translate reads popover_item_t INITIALISERS,
-	// not assignments.
-	static const popover_item_t FOLLOW[] = {{"podcast_follow", follow_cb, NULL}};
-	static const popover_item_t UNFOLLOW[] = {{"podcast_unfollow", unfollow_cb, NULL}};
+	// Two fixed tables instead of labels picked with a ternary: the tool that
+	// collects the strings to translate reads popover_item_t INITIALISERS, not
+	// assignments. Downloads sits under Follow/Unfollow in both.
+	static const popover_item_t FOLLOW[] = {{"podcast_follow", follow_cb, NULL},
+											{"podcast_downloads", downloads_cb, NULL}};
+	static const popover_item_t UNFOLLOW[] = {{"podcast_unfollow", unfollow_cb, NULL},
+											 {"podcast_downloads", downloads_cb, NULL}};
 
 	bool followed = podcastsubs_is_followed(result_feeds[menu_row_index].id);
-	popover_show(lv_event_get_current_target(e), followed ? UNFOLLOW : FOLLOW, 1);
+	popover_show(lv_event_get_current_target(e), followed ? UNFOLLOW : FOLLOW, 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -2252,6 +2270,13 @@ static void dl_poll_cb(lv_timer_t *timer) {
 	}
 	if (dl_start_next()) {
 		return;
+	}
+	// A podcast can ask to keep only so many manually downloaded episodes.
+	// Apply that after the last download of the queue has landed; automatic
+	// copies have their own, separate limit.
+	if (dl_queue_count > 0 && dl_queue_done > 0 && dl_queue[0].feed_id > 0) {
+		long long id = dl_queue[0].feed_id;
+		podcastdl_trim(dl_feed_title, PODCASTDL_KIND_MANUAL, podcast_options_keep_manual(id));
 	}
 	dl_close();
 	dl_report();
@@ -4020,8 +4045,16 @@ void podcastpage_init(gui_config_t *cfg) {
 	lv_timer_pause(art_timer);
 	qobuzart_set_root(storage_sd_root());
 
+#ifdef HOST_BUILD
+	// The simulator's card watcher uses /mnt/sd_0, which is read-only here.
+	// main.c put the writable stand-in card in cfg->sd_root_path; use the same
+	// one or following a podcast cannot write podcast.db.
+	podcastcache_set_root(cfg->sd_root_path);
+	podcastsubs_set_root(cfg->sd_root_path);
+#else
 	podcastcache_set_root(storage_sd_root());
 	podcastsubs_set_root(storage_sd_root());
+#endif
 
 	// Notices only: the first list is asked for by the page when it really
 	// opens, not at player startup -- at startup the card may not have been read

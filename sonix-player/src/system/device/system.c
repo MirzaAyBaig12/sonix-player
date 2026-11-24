@@ -823,6 +823,16 @@ static void card_databases_attach(const char *root) {
 	}
 	card_attached = true;
 
+#ifdef HOST_BUILD
+	// The simulated card lives in SONIX_SD_ROOT, not at the read-only /mnt/sd_0
+	// the mount watcher reports. Keep every card database on the same writable
+	// folder main.c gave the rest of the simulator.
+	const char *forced = getenv("SONIX_SD_ROOT");
+	if (forced && forced[0]) {
+		root = forced;
+	}
+#endif
+
 	// PATH_MAX, because the card root comes from a mount point and a mount point
 	// can be as long as any path.
 	char path[PATH_MAX];

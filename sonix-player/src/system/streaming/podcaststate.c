@@ -525,10 +525,16 @@ void podcaststate_note(const char *path, double seconds, double total, bool forc
 	}
 	bool due = current_dirty &&
 			   (force || current.played != was_played || now_ms() - current_written_ms >= WRITE_EVERY_MS);
+	bool heard_now = !was_played && current.played;
+	long long heard_feed = current.feed_id;
 	pthread_mutex_unlock(&current_lock);
 
 	if (due) {
 		current_write(false);
+	}
+	if (heard_now) {
+		// The delete is deferred until this is no longer the track playing.
+		podcastdl_delete_when_idle(path, heard_feed);
 	}
 }
 
@@ -626,6 +632,9 @@ void podcaststate_set_played(const char *path, bool played) {
 	pthread_mutex_unlock(&current_lock);
 	writer_drain();
 	write_now(key, &s);
+	if (played) {
+		podcastdl_delete_when_idle(path, s.feed_id);
+	}
 }
 
 void podcaststate_forget(const char *path) {
@@ -848,6 +857,16 @@ void podcaststate_set_played_episode(const podcast_episode_t *episode, const cha
 	pthread_mutex_unlock(&current_lock);
 	writer_drain();
 	write_now(key, &s);
+	if (played) {
+		char file[800];
+		const char *path = s.path[0] ? s.path : NULL;
+		if (!path && podcastdl_path(episode, episode->feed_title, file, sizeof(file))) {
+			path = file;
+		}
+		if (path) {
+			podcastdl_delete_when_idle(path, episode->feed_id);
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------

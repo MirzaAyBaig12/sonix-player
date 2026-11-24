@@ -116,6 +116,7 @@ This is everything Sonix Player can do today, on both the **R1** and the **R3 Pr
 - **Search** and **Trending** from the Podcast Index catalogue, or add a podcast by its feed address.
 - **Follow** up to 100 podcasts.
 - **Download** episodes to the card, one at a time or many together, and listen to them without Wi-Fi.
+- **Automatic downloads** - each podcast has a Downloads page behind the three dots in the podcast list. It turns automatic downloads on or off, manages automatic and manual downloads separately, deletes episodes once you have heard them, and keeps a chosen number of each kind (5, 10, 15, 20 or 25). Automatic copies are named with `-auto` before the extension. A "Only delete" choice limits bulk and automatic deletion to automatic downloads or all downloads.
 - **Podcasts on the card** - your own podcasts are played too.
   > One folder per podcast inside the `Podcast` folder. Title, date and cover are read from the tags.
 - **Continue listening** - every episode remembers where you stopped.

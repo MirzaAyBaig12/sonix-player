@@ -2171,11 +2171,16 @@ int main(int argc, char **argv) {
 	// which bundle was found -- which is the first thing to look at when
 	// https stations fail.
 	tls_set_card_root(gui_cfg.sd_root_path);
-	// Where downloaded stream tracks go. The real card is used -- the same
-	// root the Qobuz page and the card watcher use -- and not
-	// gui_cfg.sd_root_path, which on the simulator is a different folder: the
-	// cache and the code that cleans it must agree on one root.
+	// Where downloaded stream tracks go. On the device that is the real card,
+	// the same root the Qobuz page and the card watcher use. On the simulator
+	// the card watcher's /mnt/sd_0 is read-only, so the databases have to live
+	// in the folder SONIX_SD_ROOT points at, or following a podcast fails to
+	// write podcast.db and the Download settings have nothing to work on.
+#ifdef HOST_BUILD
+	const char *card_root = gui_cfg.sd_root_path;
+#else
 	const char *card_root = storage_sd_root();
+#endif
 	qobuzcache_set_root(card_root && card_root[0] ? card_root : gui_cfg.sd_root_path);
 	tidalcache_set_root(card_root && card_root[0] ? card_root : gui_cfg.sd_root_path);
 	podcastcache_set_root(card_root && card_root[0] ? card_root : gui_cfg.sd_root_path);

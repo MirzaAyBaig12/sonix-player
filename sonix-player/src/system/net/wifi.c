@@ -125,6 +125,13 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t wake = PTHREAD_COND_INITIALIZER;
 static pthread_t worker;
 static bool worker_running;
+static wifi_connected_hook_t connected_hook;
+
+void wifi_set_connected_hook(wifi_connected_hook_t hook) {
+	pthread_mutex_lock(&lock);
+	connected_hook = hook;
+	pthread_mutex_unlock(&lock);
+}
 
 static job_t queue[JOB_QUEUE_LEN];
 static int queue_head, queue_count;
@@ -1249,6 +1256,12 @@ static void poll_status(void) {
 	// RTC cannot be trusted.
 	if (now_online && !was_online) {
 		clock_network_sync();
+		pthread_mutex_lock(&lock);
+		wifi_connected_hook_t hook = connected_hook;
+		pthread_mutex_unlock(&lock);
+		if (hook) {
+			hook();
+		}
 	}
 }
 

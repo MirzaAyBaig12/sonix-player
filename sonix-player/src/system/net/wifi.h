@@ -16,7 +16,8 @@
 // Everything in this file is safe to call from the interface thread: the
 // blocking parts -- the scripts sleep whole seconds, wpa_cli forks -- run on
 // this module's own worker thread, and callers only read a snapshot of what it
-// has found. The UI polls; there are no callbacks.
+// has found. The UI polls; there are no callbacks, with one exception: the
+// hook below, for work that has to start the instant a link comes up.
 
 #define WIFI_SSID_MAX 64
 #define WIFI_MAX_NETWORKS 40
@@ -77,6 +78,12 @@ typedef enum {
 	WIFI_FAIL_WRONG_KEY, // the passphrase was refused or is malformed
 	WIFI_FAIL_REFUSED,	 // the command never reached wpa_supplicant
 } wifi_fail_t;
+
+// Called on the wifi worker, once, at the moment an address appears -- the
+// same edge that starts the clock's network sync. It must return at once;
+// anything that blocks belongs on a thread of its own. NULL clears it.
+typedef void (*wifi_connected_hook_t)(void);
+void wifi_set_connected_hook(wifi_connected_hook_t hook);
 
 // Starts the worker thread and, if the switch was left on, brings the radio
 // back up. Cheap and non-blocking: the actual bring-up happens on the worker.

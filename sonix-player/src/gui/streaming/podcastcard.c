@@ -25,6 +25,7 @@
 #include "src/gui/shell/tabbar.h"
 #include "src/gui/shell/theme.h"
 #include "src/gui/shell/toast.h"
+#include "src/gui/streaming/podcastauto.h"
 #include "src/gui/streaming/podcastpage.h"
 #include "src/system/core/config.h"
 #include "src/system/core/lang.h"
@@ -36,6 +37,7 @@
 #include "src/system/streaming/podcastcache.h"
 #include "src/system/streaming/podcastdl.h"
 #include "src/system/streaming/podcastsubs.h"
+#include "src/system/streaming/podcastoptions.h"
 
 #define CARD_MAX_EPISODES 400
 #define FEED_MAX_EPISODES PODCASTPAGE_FEED_MAX
@@ -1765,6 +1767,12 @@ void podcastcard_feed_loaded(unsigned ticket, int count, const char *error, cons
 	feed_loaded = true;
 	feed_more = podcastpage_feed_more();
 	feed_take_list();
+	// A podcast set to keep itself up to date gets the same check when it is
+	// opened, so a listener who goes straight to it need not wait for Wi-Fi to
+	// connect again.
+	if (first && podcast_options_auto(open_feed.id)) {
+		podcastauto_sync_feed(open_feed.id, open_feed.title);
+	}
 	p->states_seen = podcaststate_revision();
 	refill(p, !first);
 }

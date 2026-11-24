@@ -1,5 +1,6 @@
 #include "podcastdl.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -7,17 +8,23 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <utime.h>
 #include <unistd.h>
 
 #include "src/system/device/system.h"
 #include "src/system/net/http.h"
+#include "src/system/playback/device_state.h"
+#include "src/system/playback/playlist.h"
 #include "src/system/core/utils.h"
+#include "src/system/streaming/podcastcache.h"
+#include "src/system/streaming/podcastoptions.h"
 #include "src/system/streaming/podcaststate.h"
 
 #define DL_TIMEOUT_SECS 20
 #define DL_CHUNK 32768
 #define DL_NAME_MAX 150 // bytes of a file or folder name, before the extension
+#define KEPT_MAX 256	// far past the largest episode limit a podcast can have
 
 typedef struct {
 	podcast_episode_t episode;
@@ -128,7 +135,8 @@ static bool folder_of(const char *feed_title, char *out, size_t size) {
 	return n > 0 && (size_t)n < size;
 }
 
-bool podcastdl_path(const podcast_episode_t *episode, const char *feed_title, char *out, size_t size) {
+static bool build_path(const podcast_episode_t *episode, const char *feed_title, bool automatic, char *out,
+					   size_t size) {
 	if (!episode || !out || size == 0) {
 		return false;
 	}
@@ -140,14 +148,38 @@ bool podcastdl_path(const podcast_episode_t *episode, const char *feed_title, ch
 	snprintf(fallback, sizeof(fallback), "%lld", episode->id);
 	char name[DL_NAME_MAX + 1];
 	podcastdl_safe_name(episode->title, fallback, name, sizeof(name));
-	snprintf(out, size, "%s/%s.%s", folder, name, extension_for(episode->mime));
+	snprintf(out, size, "%s/%s%s.%s", folder, name, automatic ? "-auto" : "", extension_for(episode->mime));
 	return true;
+}
+
+bool podcastdl_path(const podcast_episode_t *episode, const char *feed_title, char *out, size_t size) {
+	return build_path(episode, feed_title, false, out, size);
+}
+
+bool podcastdl_auto_path(const podcast_episode_t *episode, const char *feed_title, char *out, size_t size) {
+	return build_path(episode, feed_title, true, out, size);
+}
+
+bool podcastdl_is_auto(const char *path) {
+	if (!path || !path[0]) {
+		return false;
+	}
+	const char *dot = strrchr(path, '.');
+	if (!dot || dot - path < 5) {
+		return false;
+	}
+	return strncasecmp(dot - 5, "-auto", 5) == 0;
+}
+
+static bool file_there(const char *path) {
+	struct stat st;
+	return path && path[0] && stat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
 }
 
 bool podcastdl_exists(const podcast_episode_t *episode, const char *feed_title) {
 	char path[768];
-	struct stat st;
-	return podcastdl_path(episode, feed_title, path, sizeof(path)) && stat(path, &st) == 0 && st.st_size > 0;
+	return (podcastdl_path(episode, feed_title, path, sizeof(path)) && file_there(path)) ||
+		   (podcastdl_auto_path(episode, feed_title, path, sizeof(path)) && file_there(path));
 }
 
 static void set_state(podcastdl_state_t s) {
@@ -313,8 +345,8 @@ bool podcastdl_owns(const char *path) {
 	return path && n > 0 && strncasecmp(path, base, n) == 0 && path[n] == '/';
 }
 
-bool podcastdl_start(const podcast_episode_t *episode, const char *feed_title, const char *feed_author,
-					 const char *feed_image) {
+static bool start_job(const podcast_episode_t *episode, const char *feed_title, const char *feed_author,
+					  const char *feed_image, bool automatic) {
 	if (!episode || !episode->enclosure[0]) {
 		return false;
 	}
@@ -334,7 +366,8 @@ bool podcastdl_start(const podcast_episode_t *episode, const char *feed_title, c
 	snprintf(job->feed_title, sizeof(job->feed_title), "%s", title);
 	snprintf(job->feed_author, sizeof(job->feed_author), "%s", feed_author ? feed_author : "");
 	if (!folder_of(title, job->folder, sizeof(job->folder)) ||
-		!podcastdl_path(episode, title, job->path, sizeof(job->path))) {
+		!(automatic ? podcastdl_auto_path(episode, title, job->path, sizeof(job->path))
+					: podcastdl_path(episode, title, job->path, sizeof(job->path)))) {
 		free(job);
 		return false;
 	}
@@ -377,6 +410,16 @@ bool podcastdl_start(const podcast_episode_t *episode, const char *feed_title, c
 	return true;
 }
 
+bool podcastdl_start(const podcast_episode_t *episode, const char *feed_title, const char *feed_author,
+					 const char *feed_image) {
+	return start_job(episode, feed_title, feed_author, feed_image, false);
+}
+
+bool podcastdl_start_auto(const podcast_episode_t *episode, const char *feed_title, const char *feed_author,
+						  const char *feed_image) {
+	return start_job(episode, feed_title, feed_author, feed_image, true);
+}
+
 void podcastdl_cancel(void) {
 	cancel_asked = true;
 	// A read blocked on a stalled socket returns only at the receive timeout
@@ -410,3 +453,229 @@ void podcastdl_acknowledge(void) {
 }
 
 bool podcastdl_busy(void) { return podcastdl_state(NULL, NULL) == PODCASTDL_RUNNING; }
+
+// ---------------------------------------------------------------------------
+// the downloads of one podcast: listing, keeping a limit, deleting
+// ---------------------------------------------------------------------------
+
+// Newest first, which is also the order in which episodes are kept when a
+// limit is applied.
+static int file_cmp(const void *a, const void *b) {
+	const podcastdl_file_t *x = a, *y = b;
+	if (x->when != y->when) {
+		return x->when < y->when ? 1 : -1;
+	}
+	return strcasecmp(y->path, x->path);
+}
+
+// Reads the podcast's folder. Only files with a sidecar Sonix wrote are
+// included: a file copied in by hand has no business in a manage list or under
+// a delete button. `feed_id <= 0` accepts any sidecar, for a show on the card.
+static int list_files(long long feed_id, const char *feed_title, podcastdl_kind_t kind, podcastdl_file_t *out,
+					  int max) {
+	char folder[600];
+	if (!feed_title || !feed_title[0] || !folder_of(feed_title, folder, sizeof(folder))) {
+		return 0;
+	}
+	DIR *dir = opendir(folder);
+	if (!dir) {
+		return 0;
+	}
+	int n = 0;
+	struct dirent *de;
+	int limit = out ? max : KEPT_MAX;
+	while ((de = readdir(dir)) != NULL && n < limit) {
+		if (de->d_name[0] == '.' || !playlist_is_playable_file(de->d_name)) {
+			continue;
+		}
+		char path[800];
+		snprintf(path, sizeof(path), "%.590s/%.200s", folder, de->d_name);
+		struct stat st;
+		if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) {
+			continue;
+		}
+		long long id = 0;
+		if (!podcastcache_feed_id(path, &id) || (feed_id > 0 && id != feed_id)) {
+			continue;
+		}
+		bool automatic = podcastdl_is_auto(path);
+		if (kind == PODCASTDL_KIND_AUTO && !automatic) {
+			continue;
+		}
+		if (kind == PODCASTDL_KIND_MANUAL && automatic) {
+			continue;
+		}
+
+		if (out) {
+			podcastdl_file_t *f = &out[n];
+			memset(f, 0, sizeof(*f));
+			snprintf(f->path, sizeof(f->path), "%s", path);
+			f->when = st.st_mtime;
+			f->automatic = automatic;
+			const char *dot = strrchr(de->d_name, '.');
+			int len = dot ? (int)(dot - de->d_name) : (int)strlen(de->d_name);
+			if (automatic && len >= 5) {
+				len -= 5; // the "-auto" the downloader added
+			}
+			snprintf(f->title, sizeof(f->title), "%.*s", len > 0 ? len : 0, de->d_name);
+			podcaststate_t state;
+			if (podcaststate_get(path, &state)) {
+				f->played = state.played;
+				f->position = state.position;
+				// Playing now, or left part way through: never delete it under the
+				// listener, even when it is past the limit.
+				f->active = state.touched == PODCASTSTATE_TOUCHED_NOW || (!state.played && state.position > 5);
+			}
+		}
+		n++;
+	}
+	closedir(dir);
+	if (out) {
+		qsort(out, (size_t)n, sizeof(*out), file_cmp);
+	}
+	return n;
+}
+
+int podcastdl_list(const char *feed_title, podcastdl_kind_t kind, podcastdl_file_t *out, int max) {
+	if (!out || max <= 0) {
+		return 0;
+	}
+	return list_files(0, feed_title, kind, out, max);
+}
+
+int podcastdl_count(const char *feed_title, podcastdl_kind_t kind) {
+	return list_files(0, feed_title, kind, NULL, 0);
+}
+
+static bool file_delete(const char *path) {
+	if (remove(path) != 0) {
+		return false;
+	}
+	char side[820];
+	snprintf(side, sizeof(side), "%s.tags", path);
+	remove(side);
+	snprintf(side, sizeof(side), "%s.jpg", path);
+	remove(side);
+	snprintf(side, sizeof(side), "%s.png", path);
+	remove(side);
+	podcaststate_forget(path);
+	return true;
+}
+
+int podcastdl_trim(const char *feed_title, podcastdl_kind_t kind, int keep) {
+	if (keep <= 0) {
+		return 0;
+	}
+	podcastdl_file_t *items = calloc(KEPT_MAX, sizeof(*items));
+	if (!items) {
+		return 0;
+	}
+	int n = list_files(0, feed_title, kind, items, KEPT_MAX);
+	int kept = 0;
+	int removed = 0;
+	for (int i = 0; i < n; i++) {
+		if (items[i].active) {
+			continue;
+		}
+		kept++;
+		if (kept > keep && file_delete(items[i].path)) {
+			removed++;
+		}
+	}
+	free(items);
+	if (removed > 0) {
+		sync();
+	}
+	return removed;
+}
+
+int podcastdl_delete_all(const char *feed_title, podcastdl_kind_t kind) {
+	podcastdl_file_t *items = calloc(KEPT_MAX, sizeof(*items));
+	if (!items) {
+		return 0;
+	}
+	int n = list_files(0, feed_title, kind, items, KEPT_MAX);
+	int removed = 0;
+	for (int i = 0; i < n; i++) {
+		if (!items[i].active && file_delete(items[i].path)) {
+			removed++;
+		}
+	}
+	free(items);
+	if (removed > 0) {
+		sync();
+	}
+	return removed;
+}
+
+bool podcastdl_delete_download(const char *path) {
+	if (!path || !path[0] || !podcastdl_owns(path) || !file_delete(path)) {
+		return false;
+	}
+	sync();
+	return true;
+}
+
+#define PENDING_MAX 32
+static struct {
+	char path[800];
+	long long feed_id;
+} pending[PENDING_MAX];
+static int pending_count;
+static pthread_mutex_t pending_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void podcastdl_delete_when_idle(const char *path, long long feed_id) {
+	if (!path || !path[0] || feed_id <= 0 || !podcastdl_owns(path)) {
+		return;
+	}
+	pthread_mutex_lock(&pending_lock);
+	for (int i = 0; i < pending_count; i++) {
+		if (strcmp(pending[i].path, path) == 0) {
+			pthread_mutex_unlock(&pending_lock);
+			return;
+		}
+	}
+	if (pending_count < PENDING_MAX) {
+		snprintf(pending[pending_count].path, sizeof(pending[0].path), "%s", path);
+		pending[pending_count].feed_id = feed_id;
+		pending_count++;
+	}
+	pthread_mutex_unlock(&pending_lock);
+}
+
+void podcastdl_apply_pending(void) {
+	pthread_mutex_lock(&pending_lock);
+	if (pending_count > 0) {
+		device_state_t device;
+		device_state_get(&device);
+		for (int i = 0; i < pending_count;) {
+			podcaststate_t state;
+			bool known = podcaststate_get(pending[i].path, &state);
+			// The state row still says "playing" when the player is left sitting
+			// at the end of a finished episode with repeat off, so ask the player
+			// itself rather than trusting `touched` here.
+			bool playing = !device.live && strcmp(device.current_file, pending[i].path) == 0;
+			bool drop = true;
+			if (known && state.played) {
+				if (playing) {
+					drop = false; // try again once the player has moved on
+				} else if (podcast_options_delete_heard(pending[i].feed_id) &&
+						   (podcast_options_delete_all(pending[i].feed_id) ||
+							podcastdl_is_auto(pending[i].path))) {
+					// "Only delete automatic downloads" applies here too: a
+					// manual copy stays unless the listener asks for all of them.
+					podcastdl_delete_download(pending[i].path);
+				}
+			}
+			if (drop) {
+				pending_count--;
+				if (i < pending_count) {
+					pending[i] = pending[pending_count];
+				}
+			} else {
+				i++;
+			}
+		}
+	}
+	pthread_mutex_unlock(&pending_lock);
+}
